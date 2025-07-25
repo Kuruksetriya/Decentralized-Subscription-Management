@@ -1,0 +1,225 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.19;
+
+contract DecentralizedSubscriptionManagement {
+    struct Subscription {
+        address subscriber;
+        address serviceProvider;
+        uint256 amount;
+        uint256 interval; // in seconds
+        uint256 nextPayment;
+        bool isActive;
+        string serviceName;
+    }
+
+    mapping(bytes32 => Subscription) public subscriptions;
+    mapping(address => bytes32[]) public userSubscriptions;
+    mapping(address => bytes32[]) public providerSubscriptions;
+    mapping(address => uint256) public balances;
+
+    event SubscriptionCreated(
+        bytes32 indexed subscriptionId,
+        address indexed subscriber,
+        address indexed serviceProvider,
+        uint256 amount,
+        uint256 interval,
+        string serviceName
+    );
+
+    event PaymentProcessed(
+        bytes32 indexed subscriptionId,
+        address indexed subscriber,
+        address indexed serviceProvider,
+        uint256 amount
+    );
+
+    event SubscriptionCancelled(
+        bytes32 indexed subscriptionId,
+        address indexed subscriber
+    );
+
+    modifier onlySubscriber(bytes32 _subscriptionId) {
+        require(
+            subscriptions[_subscriptionId].subscriber == msg.sender,
+            "Only subscriber can perform this action"
+        );
+        _;
+    }
+
+    modifier subscriptionExists(bytes32 _subscriptionId) {
+        require(
+            subscriptions[_subscriptionId].subscriber != address(0),
+            "Subscription does not exist"
+        );
+        _;
+    }
+
+    /**
+     * @dev Creates a new subscription
+     * @param _serviceProvider Address of the service provider
+     * @param _amount Amount to be paid per interval
+     * @param _interval Payment interval in seconds
+     * @param _serviceName Name of the service
+     */
+    function createSubscription(
+        address _serviceProvider,
+        uint256 _amount,
+        uint256 _interval,
+        string memory _serviceName
+    ) external payable {
+        require(_serviceProvider != address(0), "Invalid service provider");
+        require(_amount > 0, "Amount must be greater than 0");
+        require(_interval > 0, "Interval must be greater than 0");
+        require(msg.value >= _amount, "Insufficient payment for first subscription");
+
+        bytes32 subscriptionId = keccak256(
+            abi.encodePacked(
+                msg.sender,
+                _serviceProvider,
+                _serviceName,
+                block.timestamp
+            )
+        );
+
+        subscriptions[subscriptionId] = Subscription({
+            subscriber: msg.sender,
+            serviceProvider: _serviceProvider,
+            amount: _amount,
+            interval: _interval,
+            nextPayment: block.timestamp + _interval,
+            isActive: true,
+            serviceName: _serviceName
+        });
+
+        userSubscriptions[msg.sender].push(subscriptionId);
+        providerSubscriptions[_serviceProvider].push(subscriptionId);
+
+        // Process first payment
+        balances[_serviceProvider] += _amount;
+        
+        // Refund excess payment
+        if (msg.value > _amount) {
+            payable(msg.sender).transfer(msg.value - _amount);
+        }
+
+        emit SubscriptionCreated(
+            subscriptionId,
+            msg.sender,
+            _serviceProvider,
+            _amount,
+            _interval,
+            _serviceName
+        );
+
+        emit PaymentProcessed(
+            subscriptionId,
+            msg.sender,
+            _serviceProvider,
+            _amount
+        );
+    }
+
+    /**
+     * @dev Processes payment for an active subscription
+     * @param _subscriptionId ID of the subscription
+     */
+    function processPayment(bytes32 _subscriptionId) 
+        external 
+        payable 
+        subscriptionExists(_subscriptionId) 
+    {
+        Subscription storage sub = subscriptions[_subscriptionId];
+        
+        require(sub.isActive, "Subscription is not active");
+        require(block.timestamp >= sub.nextPayment, "Payment not due yet");
+        require(msg.value >= sub.amount, "Insufficient payment amount");
+
+        // Update next payment time
+        sub.nextPayment = block.timestamp + sub.interval;
+
+        // Transfer payment to service provider
+        balances[sub.serviceProvider] += sub.amount;
+
+        // Refund excess payment
+        if (msg.value > sub.amount) {
+            payable(msg.sender).transfer(msg.value - sub.amount);
+        }
+
+        emit PaymentProcessed(
+            _subscriptionId,
+            sub.subscriber,
+            sub.serviceProvider,
+            sub.amount
+        );
+    }
+
+    /**
+     * @dev Cancels an active subscription
+     * @param _subscriptionId ID of the subscription to cancel
+     */
+    function cancelSubscription(bytes32 _subscriptionId)
+        external
+        onlySubscriber(_subscriptionId)
+        subscriptionExists(_subscriptionId)
+    {
+        Subscription storage sub = subscriptions[_subscriptionId];
+        require(sub.isActive, "Subscription is already cancelled");
+
+        sub.isActive = false;
+
+        emit SubscriptionCancelled(_subscriptionId, msg.sender);
+    }
+
+    /**
+     * @dev Allows service providers to withdraw their earned payments
+     */
+    function withdrawEarnings() external {
+        uint256 amount = balances[msg.sender];
+        require(amount > 0, "No earnings to withdraw");
+
+        balances[msg.sender] = 0;
+        payable(msg.sender).transfer(amount);
+    }
+
+    // View functions
+    function getSubscription(bytes32 _subscriptionId)
+        external
+        view
+        returns (Subscription memory)
+    {
+        return subscriptions[_subscriptionId];
+    }
+
+    function getUserSubscriptions(address _user)
+        external
+        view
+        returns (bytes32[] memory)
+    {
+        return userSubscriptions[_user];
+    }
+
+    function getProviderSubscriptions(address _provider)
+        external
+        view
+        returns (bytes32[] memory)
+    {
+        return providerSubscriptions[_provider];
+    }
+
+    function getProviderBalance(address _provider)
+        external
+        view
+        returns (uint256)
+    {
+        return balances[_provider];
+    }
+
+    function isPaymentDue(bytes32 _subscriptionId)
+        external
+        view
+        returns (bool)
+    {
+        Subscription memory sub = subscriptions[_subscriptionId];
+        return sub.isActive && block.timestamp >= sub.nextPayment;
+    }
+}
